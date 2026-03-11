@@ -396,6 +396,3 @@ CMD ["otree", "prodserver", "0.0.0.0:8000"]
 ### 技術支援
 
 如有技術問題或研究合作需求，請透過 GitHub Issues 提出。
-#   C a r b o n  
- #   C a r b o n  
- 
