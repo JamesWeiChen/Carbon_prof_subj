@@ -1,0 +1,81 @@
+{{ block title }}
+    基本資料
+{{ endblock }}
+{{ block content }}
+    <P>
+        感謝您參與本次實驗。以下資訊是報帳收據要用的。
+        包含以下資訊，以及後續的問卷數據，我們都不會揭露可供辨識您身份的資訊給第三方。
+        敬請放心作答，由衷感謝您的幫忙與支持！<br>
+    </P>
+
+    {{ formfield 'name' }}
+    {{ formfield 'is_foreign' }}
+
+    <div id="id-number-section" style="display: none;">
+        {{ formfield 'id_number' }}
+    </div>
+
+    {{ formfield 'address' }}
+
+    <div id="foreign-student-section" style="display: none;">
+        <hr>
+        <p>請提供以下外籍生資訊：</p>
+        {{ formfield 'arc' }}
+        {{ formfield 'passport' }}
+        {{ formfield 'nation' }}
+        {{ formfield 'stay' }}
+    </div>
+    {{ next_button }}
+
+    <script>
+        (function () {
+            const foreignSection = document.getElementById('foreign-student-section');
+            const foreignRadios = document.querySelectorAll('input[name="is_foreign"]');
+            const extraInputs = foreignSection.querySelectorAll('input');
+            const idSection = document.getElementById('id-number-section');
+            const idInput = idSection.querySelector('input');
+
+            function clearExtraInputs() {
+                extraInputs.forEach((input) => {
+                    if (input.type === 'radio') {
+                        input.checked = false;
+                    } else {
+                        input.value = '';
+                    }
+                });
+            }
+
+            function toggleForeignSection() {
+                const selected = document.querySelector('input[name="is_foreign"]:checked');
+
+                if (!selected) {
+                    foreignSection.style.display = 'none';
+                    clearExtraInputs();
+                    idSection.style.display = 'none';
+                    if (idInput) {
+                        idInput.value = '';
+                    }
+                    return;
+                }
+
+                if (selected.value === '是') {
+                    foreignSection.style.display = '';
+                    idSection.style.display = 'none';
+                    if (idInput) {
+                        idInput.value = '';
+                    }
+                } else {
+                    foreignSection.style.display = 'none';
+                    clearExtraInputs();
+                    idSection.style.display = '';
+                }
+            }
+
+            foreignRadios.forEach((radio) => {
+                radio.addEventListener('change', toggleForeignSection);
+            });
+
+            toggleForeignSection();
+        })();
+    </script>
+{{ endblock }}

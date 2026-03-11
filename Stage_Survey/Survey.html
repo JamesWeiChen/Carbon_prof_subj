@@ -1,0 +1,54 @@
+{{ block title }}
+問卷
+{{ endblock }}
+
+{{ block content }}
+<style>
+  .otree-body {
+      max-width: 50vw !important;
+      padding-left: 0;
+      padding-right: 0;
+  }
+  /* 隱藏 oTree 預設整頁錯誤提示 0301*/
+  .alert-danger {
+      display: none;
+  }
+</style>
+
+  {{ formfields }}
+
+  {{ next_button }}
+<!-- 新增 0301 目的是讓填寫其他時才會跳出「其他」欄位 -->
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const otherInput = document.querySelector('[name="env_job_type_other"]');
+    const jobTypeRadios = document.querySelectorAll('input[name="env_job_type"]');
+
+    if (!otherInput || jobTypeRadios.length === 0) return;
+
+    const otherWrapper =
+        otherInput.closest('.mb-3') ||
+        otherInput.closest('.form-group') ||
+        otherInput.parentElement;
+
+    function toggleOtherField() {
+        const selected = document.querySelector('input[name="env_job_type"]:checked');
+
+        if (selected && selected.value === '其他（請填寫以下欄位）') {
+            otherWrapper.style.display = '';
+            otherInput.disabled = false;
+        } else {
+            otherWrapper.style.display = 'none';
+            otherInput.value = '';
+            otherInput.disabled = true;
+        }
+    }
+
+    jobTypeRadios.forEach(function (radio) {
+        radio.addEventListener('change', toggleOtherField);
+    });
+
+    toggleOtherField();
+});
+</script>
+{{ endblock }}
