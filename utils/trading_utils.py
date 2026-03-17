@@ -3,8 +3,10 @@
 """
 from otree.api import *
 import json
+import random
 import time
 from typing import Dict, List, Any, Tuple, Optional
+from django.db import transaction
 
 class TradingError(Exception):
     """交易錯誤的基礎類別"""
@@ -354,6 +356,110 @@ def execute_trade(
     print(f"成功交易: 買方{buyer.id_in_group} <- 賣方{seller.id_in_group}, "
           f"價格{price}, 數量{quantity}")
 
+
+def match_and_execute_atomically(
+    group: BaseGroup,
+    initiator_id: int,
+    direction: str,
+    price: int,
+    quantity: int,
+    item_field: str = 'current_items',
+    target_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """在同一個資料庫交易中完成撮合、校驗與成交。"""
+    price = int(price)
+    quantity = int(quantity)
+
+    with transaction.atomic():
+        locked_group = group.__class__.objects.select_for_update().get(pk=group.pk)
+        locked_players = {
+            p.id_in_group: p
+            for p in group.get_players()[0].__class__.objects.select_for_update().filter(group=locked_group)
+        }
+
+        buy_orders, sell_orders = parse_orders(locked_group)
+        is_buy_order = direction == 'buy'
+        opposite_orders = sell_orders if is_buy_order else buy_orders
+
+        if target_id is not None:
+            matching_orders = [
+                (i, order) for i, order in enumerate(opposite_orders)
+                if int(order[0]) == int(target_id)
+                and float(order[1]) == float(price)
+                and int(order[2]) == quantity
+            ]
+        else:
+            matching_orders = find_matching_orders(
+                opposite_orders, initiator_id, price, quantity, is_buy_order
+            )
+
+        if not matching_orders:
+            return {'success': False, 'reason': 'no_match'}
+
+        if target_id is None:
+            if is_buy_order:
+                best_price = min(float(order[1][1]) for order in matching_orders)
+            else:
+                best_price = max(float(order[1][1]) for order in matching_orders)
+            shortlisted = [m for m in matching_orders if float(m[1][1]) == best_price]
+        else:
+            shortlisted = matching_orders
+
+        random.shuffle(shortlisted)
+        _, chosen_order = shortlisted[0]
+        counterparty_id = int(chosen_order[0])
+        trade_price = int(float(chosen_order[1]))
+
+        buy_orders, sell_orders = parse_orders(locked_group)
+        latest_opposite_orders = sell_orders if is_buy_order else buy_orders
+        order_still_exists = any(
+            int(o[0]) == counterparty_id
+            and float(o[1]) == float(chosen_order[1])
+            and int(o[2]) == int(chosen_order[2])
+            for o in latest_opposite_orders
+        )
+        if not order_still_exists:
+            return {'success': False, 'reason': 'order_missing'}
+
+        buyer_id = initiator_id if is_buy_order else counterparty_id
+        seller_id = counterparty_id if is_buy_order else initiator_id
+        buyer = locked_players.get(buyer_id)
+        seller = locked_players.get(seller_id)
+        if not buyer or not seller:
+            return {'success': False, 'reason': 'counterparty_missing'}
+
+        if buyer.current_cash < trade_price * quantity:
+            return {'success': False, 'reason': 'insufficient_cash'}
+        if getattr(seller, item_field) < quantity:
+            return {'success': False, 'reason': 'insufficient_items'}
+
+        execute_trade(locked_group, buyer, seller, trade_price, quantity, item_field)
+
+        cancel_player_orders(locked_group, buyer_id, 'buy')
+        cancel_player_orders(locked_group, seller_id, 'sell')
+
+        buy_orders, sell_orders = parse_orders(locked_group)
+        if is_buy_order:
+            sell_orders = [o for o in sell_orders if not (
+                int(o[0]) == counterparty_id
+                and float(o[1]) == float(chosen_order[1])
+                and int(o[2]) == int(chosen_order[2])
+            )]
+        else:
+            buy_orders = [o for o in buy_orders if not (
+                int(o[0]) == counterparty_id
+                and float(o[1]) == float(chosen_order[1])
+                and int(o[2]) == int(chosen_order[2])
+            )]
+        save_orders(locked_group, buy_orders, sell_orders)
+
+        return {
+            'success': True,
+            'buyer_id': buyer_id,
+            'seller_id': seller_id,
+            'trade_price': trade_price,
+        }
+
 def process_new_order(
     player: BasePlayer,
     group: BaseGroup,
@@ -415,92 +521,50 @@ def process_new_order(
     
     # 尋找匹配的訂單
     if direction == 'buy':
-        matching_orders = find_matching_orders(
-            sell_orders, player.id_in_group, price, quantity, True
+        result = match_and_execute_atomically(
+            group=group,
+            initiator_id=player.id_in_group,
+            direction='buy',
+            price=price,
+            quantity=quantity,
+            item_field=item_field,
         )
-        
-        if matching_orders:
-            # 找到最低價格的匹配賣單
-            best_idx, best_order = min(matching_orders, key=lambda x: float(x[1][1]))
-            seller_id = int(best_order[0])
-            
-            try:
-                seller = group.get_player_by_id(seller_id)
-                trade_price = int(float(best_order[1]))  # 確保交易價格為整數
-                execute_trade(group, player, seller, trade_price, quantity, item_field)
-                
-                # 保留：交易成功時取消雙方其他訂單
-                cancel_player_orders(group, player.id_in_group, 'buy')
-                cancel_player_orders(group, seller_id, 'sell')
-                
-                # 從賣單列表移除已成交的訂單
-                buy_orders, sell_orders = parse_orders(group)
-                sell_orders = [o for o in sell_orders if not (
-                    int(o[0]) == seller_id and 
-                    float(o[1]) == float(best_order[1]) and 
-                    int(o[2]) == int(best_order[2])
-                )]
-                save_orders(group, buy_orders, sell_orders)
-                
-                # 修改：添加自動交易成功通知，價格顯示為整數
-                return {
-                    'type': 'trade_executed', 
-                    'update_all': True,
-                    'notifications': {
-                        player.id_in_group: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}',
-                        seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}'
-                    }
+        if result.get('success'):
+            seller_id = result['seller_id']
+            trade_price = result['trade_price']
+            return {
+                'type': 'trade_executed',
+                'update_all': True,
+                'notifications': {
+                    player.id_in_group: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}',
+                    seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}'
                 }
-                
-            except Exception as e:
-                print(f"交易執行失敗: {e}")
-                # 繼續添加訂單
+            }
         
         # 沒有匹配或執行失敗，添加新買單
         buy_orders.append([player.id_in_group, price, quantity])
         save_orders(group, buy_orders, sell_orders)
         
     else:  # sell
-        matching_orders = find_matching_orders(
-            buy_orders, player.id_in_group, price, quantity, False
+        result = match_and_execute_atomically(
+            group=group,
+            initiator_id=player.id_in_group,
+            direction='sell',
+            price=price,
+            quantity=quantity,
+            item_field=item_field,
         )
-        
-        if matching_orders:
-            # 找到最高價格的匹配買單
-            best_idx, best_order = max(matching_orders, key=lambda x: float(x[1][1]))
-            buyer_id = int(best_order[0])
-            
-            try:
-                buyer = group.get_player_by_id(buyer_id)
-                trade_price = int(float(best_order[1]))  # 確保交易價格為整數
-                execute_trade(group, buyer, player, trade_price, quantity, item_field)
-                
-                # 保留：交易成功時取消雙方其他訂單
-                cancel_player_orders(group, buyer_id, 'buy')
-                cancel_player_orders(group, player.id_in_group, 'sell')
-                
-                # 從買單列表移除已成交的訂單
-                buy_orders, sell_orders = parse_orders(group)
-                buy_orders = [o for o in buy_orders if not (
-                    int(o[0]) == buyer_id and 
-                    float(o[1]) == float(best_order[1]) and 
-                    int(o[2]) == int(best_order[2])
-                )]
-                save_orders(group, buy_orders, sell_orders)
-                
-                # 修改：添加自動交易成功通知，價格顯示為整數
-                return {
-                    'type': 'trade_executed', 
-                    'update_all': True,
-                    'notifications': {
-                        player.id_in_group: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}',
-                        buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}'
-                    }
+        if result.get('success'):
+            buyer_id = result['buyer_id']
+            trade_price = result['trade_price']
+            return {
+                'type': 'trade_executed',
+                'update_all': True,
+                'notifications': {
+                    player.id_in_group: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}',
+                    buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}'
                 }
-                
-            except Exception as e:
-                print(f"交易執行失敗: {e}")
-                # 繼續添加訂單
+            }
         
         # 沒有匹配或執行失敗，添加新賣單
         sell_orders.append([player.id_in_group, price, quantity])
@@ -546,79 +610,66 @@ def process_accept_offer(
     # 確保價格為整數
     price = int(price)
     
+    result = {'success': False, 'reason': 'unknown'}
+
     try:
-        if offer_type == 'sell':
-            # 接受賣單（玩家是買方）
-            seller = group.get_player_by_id(target_id)
-            execute_trade(group, player, seller, price, quantity, item_field)
-            
-            # 保留：交易成功時取消雙方其他訂單
-            cancel_player_orders(group, player.id_in_group, 'buy')
-            cancel_player_orders(group, target_id, 'sell')
-            
-            # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
-            sell_orders = [o for o in sell_orders if not (
-                int(o[0]) == target_id and 
-                float(o[1]) == price and 
-                int(o[2]) == quantity
-            )]
-            save_orders(group, buy_orders, sell_orders)
-            
-            return {
-                'type': 'trade_executed',
-                'update_all': True,
-                'notifications': {
-                    player.id_in_group: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}',
-                    target_id: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}'
-                }
-            }
-            
-        else:  # offer_type == 'buy'
-            # 接受買單（玩家是賣方）
-            # 先驗證賣方有足夠的物品
-            current_items = getattr(player, item_field)
-            if current_items < quantity:
+        result = match_and_execute_atomically(
+            group=group,
+            initiator_id=player.id_in_group,
+            direction='buy' if offer_type == 'sell' else 'sell',
+            price=price,
+            quantity=quantity,
+            item_field=item_field,
+            target_id=target_id,
+        )
+        if result.get('success'):
+            buyer_id = result['buyer_id']
+            seller_id = result['seller_id']
+            trade_price = result['trade_price']
+            if buyer_id == player.id_in_group:
                 return {
-                    'type': 'fail',
+                    'type': 'trade_executed',
+                    'update_all': True,
                     'notifications': {
-                        player.id_in_group: f'您的{item_name}不足'
+                        buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}',
+                        seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}'
                     }
                 }
-            
-            buyer = group.get_player_by_id(target_id)
-            execute_trade(group, buyer, player, price, quantity, item_field)
-            
-            # 保留：交易成功時取消雙方其他訂單
-            cancel_player_orders(group, target_id, 'buy')
-            cancel_player_orders(group, player.id_in_group, 'sell')
-            
-            # 移除已成交的訂單
-            buy_orders, sell_orders = parse_orders(group)
-            buy_orders = [o for o in buy_orders if not (
-                int(o[0]) == target_id and 
-                float(o[1]) == price and 
-                int(o[2]) == quantity
-            )]
-            save_orders(group, buy_orders, sell_orders)
-            
             return {
                 'type': 'trade_executed',
                 'update_all': True,
                 'notifications': {
-                    player.id_in_group: f'交易成功：您以價格 {price} 賣出了 {quantity} 個{item_name}',
-                    target_id: f'交易成功：您以價格 {price} 買入了 {quantity} 個{item_name}'
+                    seller_id: f'交易成功：您以價格 {trade_price} 賣出了 {quantity} 個{item_name}',
+                    buyer_id: f'交易成功：您以價格 {trade_price} 買入了 {quantity} 個{item_name}'
                 }
             }
-            
+
     except Exception as e:
         print(f"接受訂單失敗: {e}")
+
+    if offer_type == 'buy' and result.get('reason') == 'insufficient_items':
         return {
             'type': 'fail',
             'notifications': {
-                player.id_in_group: '交易失敗：找不到交易對象'
+                player.id_in_group: f'您的{item_name}不足'
             }
         }
+
+    if result.get('reason') in {'order_missing', 'no_match'}:
+        msg = '交易失敗：訂單已不存在'
+    elif result.get('reason') == 'insufficient_cash':
+        msg = '交易失敗：買方現金不足'
+    elif result.get('reason') == 'insufficient_items':
+        msg = f'交易失敗：賣方{item_name}不足'
+    else:
+        msg = '交易失敗：找不到交易對象'
+
+    return {
+        'type': 'fail',
+        'notifications': {
+            player.id_in_group: msg
+        }
+    }
 
 def calculate_locked_resources(
     player: BasePlayer, 
