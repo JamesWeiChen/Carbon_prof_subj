@@ -97,7 +97,7 @@ SESSION_CONFIGS = [
             config.get_stage_name_in_url('survey'),
         ],
         'num_demo_participants': config.players_per_group,
-        'display_name': "正式實驗:先祖父後平均",
+        'display_name': "正式實驗：先祖父後平均",
         'allocation_order': 'GF_then_Equal',   # 新增
     },
 
