@@ -581,9 +581,9 @@ class TradingMarket(Page):
         try:
             # 提取玩家自己的買單和賣單
             my_buy_offers = [{'player_id': int(pid), 'price': int(float(price)), 'quantity': int(qt)} 
-                          for pid, price, qt in buy_sorted if int(pid) == player.id_in_group]
+                          for pid, price, qt, *_ in buy_sorted if int(pid) == player.id_in_group]
             my_sell_offers = [{'player_id': int(pid), 'price': int(float(price)), 'quantity': int(qt)} 
-                           for pid, price, qt in sell_sorted if int(pid) == player.id_in_group]
+                           for pid, price, qt, *_ in sell_sorted if int(pid) == player.id_in_group]
             
             # 修改：使用新的過濾函數，每個數量級別顯示最好的3筆
             display_buy_orders = filter_top_buy_orders_for_display(buy_sorted, max_per_quantity=3)
@@ -591,9 +591,9 @@ class TradingMarket(Page):
             
             # 轉換為前端格式
             public_buy_offers = [{'player_id': int(pid), 'price': int(float(price)), 'quantity': int(qt)} 
-                               for pid, price, qt in display_buy_orders]
+                               for pid, price, qt, *_ in display_buy_orders]
             public_sell_offers = [{'player_id': int(pid), 'price': int(float(price)), 'quantity': int(qt)} 
-                                for pid, price, qt in display_sell_orders]
+                                for pid, price, qt, *_ in display_sell_orders]
             
             # 排序（保持原有的排序邏輯）
             public_buy_offers.sort(key=lambda x: (-x['price'], x['player_id']))
