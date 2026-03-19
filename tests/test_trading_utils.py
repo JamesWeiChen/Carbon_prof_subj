@@ -52,28 +52,32 @@ class DummyPlayer:
 
 class TradingUtilsTests(unittest.TestCase):
     def setUp(self):
-        atomic_patcher = patch.object(trading_utils.transaction, 'atomic', return_value=nullcontext())
-        lock_pair_patcher = patch.object(
+        lock_ctx_patcher = patch.object(
             trading_utils,
-            '_locked_group_and_player',
+            '_group_order_book_lock',
+            side_effect=lambda group: nullcontext(),
+        )
+        reload_pair_patcher = patch.object(
+            trading_utils,
+            '_reload_group_and_player',
             side_effect=lambda player, group: (player, group),
         )
-        lock_by_id_patcher = patch.object(
+        reload_by_id_patcher = patch.object(
             trading_utils,
-            '_locked_player_by_id',
+            '_reload_player_by_id',
             side_effect=lambda _model, group, player_id: group.get_player_by_id(player_id),
         )
-        persist_patcher = patch.object(trading_utils, '_persist_trade_models', return_value=None)
+        commit_patcher = patch.object(trading_utils, '_commit_trading_state', return_value=None)
 
-        self.addCleanup(atomic_patcher.stop)
-        self.addCleanup(lock_pair_patcher.stop)
-        self.addCleanup(lock_by_id_patcher.stop)
-        self.addCleanup(persist_patcher.stop)
+        self.addCleanup(lock_ctx_patcher.stop)
+        self.addCleanup(reload_pair_patcher.stop)
+        self.addCleanup(reload_by_id_patcher.stop)
+        self.addCleanup(commit_patcher.stop)
 
-        atomic_patcher.start()
-        lock_pair_patcher.start()
-        lock_by_id_patcher.start()
-        persist_patcher.start()
+        lock_ctx_patcher.start()
+        reload_pair_patcher.start()
+        reload_by_id_patcher.start()
+        commit_patcher.start()
 
     def test_process_new_order_sell_consumes_matching_buy_order(self):
         group = DummyGroup()

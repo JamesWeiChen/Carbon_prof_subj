@@ -2,21 +2,13 @@
 交易工具庫：包含交易市場相關的共用函數
 """
 from otree.api import *
+from otree.database import db
 import json
 import random
 import time
-from contextlib import nullcontext
+import threading
+from contextlib import contextmanager
 from typing import Dict, List, Any, Tuple, Optional
-
-try:
-    from django.db import transaction
-except ModuleNotFoundError:
-    class _FallbackTransaction:
-        @staticmethod
-        def atomic():
-            return nullcontext()
-
-    transaction = _FallbackTransaction()
 
 class TradingError(Exception):
     """交易錯誤的基礎類別"""
@@ -35,43 +27,68 @@ class DuplicateOrderError(TradingError):
     pass
 
 
-def _locked_group_and_player(
+_ORDER_BOOK_LOCKS: Dict[str, threading.RLock] = {}
+_ORDER_BOOK_LOCKS_GUARD = threading.Lock()
+
+
+def _order_book_lock_key(group: BaseGroup) -> str:
+    """為每個 group 建立固定的 order book lock key。"""
+    return f"{group.__class__.__module__}:{group.__class__.__name__}:{group.id}"
+
+
+def _get_order_book_lock(group: BaseGroup) -> threading.RLock:
+    """取得 group 專屬的可重入鎖。"""
+    key = _order_book_lock_key(group)
+    with _ORDER_BOOK_LOCKS_GUARD:
+        lock = _ORDER_BOOK_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _ORDER_BOOK_LOCKS[key] = lock
+    return lock
+
+
+@contextmanager
+def _group_order_book_lock(group: BaseGroup):
+    """序列化同一個市場 group 的撮合/掛單操作。"""
+    lock = _get_order_book_lock(group)
+    with lock:
+        yield
+
+
+def _reload_group_and_player(
     player: BasePlayer,
     group: BaseGroup,
 ) -> Tuple[BasePlayer, BaseGroup]:
-    """鎖定目前玩家與所屬 group，避免併發撮合重複成交。"""
-    locked_group = group.__class__.objects.select_for_update().get(pk=group.pk)
-    locked_player = player.__class__.objects.select_for_update().get(pk=player.pk)
+    """重新從資料庫 session 讀取最新的 group/player 狀態。"""
+    db.expire_all()
 
-    if hasattr(group, 'subsession') and getattr(group, 'subsession', None) is not None:
-        locked_subsession = group.subsession.__class__.objects.select_for_update().get(
-            pk=group.subsession.pk
-        )
-        locked_group.subsession = locked_subsession
+    if hasattr(group.__class__, '__table__'):
+        fresh_group = db.query(group.__class__).filter_by(id=group.id).one()
+    else:
+        fresh_group = group
 
-    return locked_player, locked_group
+    if hasattr(player.__class__, '__table__'):
+        fresh_player = db.query(player.__class__).filter_by(id=player.id).one()
+    else:
+        fresh_player = player
+
+    return fresh_player, fresh_group
 
 
-def _locked_player_by_id(
+def _reload_player_by_id(
     player_model: type,
     group: BaseGroup,
     player_id: int,
 ) -> BasePlayer:
-    """以 id_in_group 鎖定同組玩家。"""
-    return player_model.objects.select_for_update().get(
-        group=group,
-        id_in_group=player_id,
-    )
+    """依 id_in_group 重新讀取同組玩家的最新狀態。"""
+    if hasattr(player_model, '__table__'):
+        return db.query(player_model).filter_by(group=group, id_in_group=player_id).one()
+    return group.get_player_by_id(player_id)
 
 
-def _persist_trade_models(group: BaseGroup, *players: BasePlayer) -> None:
-    """儲存交易過程中被更新的資料列。"""
-    for participant in players:
-        participant.save()
-
-    group.save()
-    if hasattr(group, 'subsession') and getattr(group, 'subsession', None) is not None:
-        group.subsession.save()
+def _commit_trading_state() -> None:
+    """提交目前 request 中的交易狀態，讓下一個請求看到最新 order book。"""
+    db.commit()
 
 
 def _order_exists(
@@ -481,8 +498,8 @@ def process_new_order(
     Returns:
         需要廣播給所有玩家的狀態更新
     """
-    with transaction.atomic():
-        locked_player, locked_group = _locked_group_and_player(player, group)
+    with _group_order_book_lock(group):
+        locked_player, locked_group = _reload_group_and_player(player, group)
 
         # 驗證訂單
         try:
@@ -539,7 +556,7 @@ def process_new_order(
                 seller_id = int(best_order[0])
 
                 try:
-                    seller = _locked_player_by_id(player.__class__, locked_group, seller_id)
+                    seller = _reload_player_by_id(player.__class__, locked_group, seller_id)
                     trade_price = int(float(best_order[1]))  # 確保交易價格為整數
                     execute_trade(locked_group, locked_player, seller, trade_price, quantity, item_field)
 
@@ -555,7 +572,7 @@ def process_new_order(
                         int(o[2]) == int(best_order[2])
                     )]
                     save_orders(locked_group, buy_orders, sell_orders)
-                    _persist_trade_models(locked_group, locked_player, seller)
+                    _commit_trading_state()
 
                     return {
                         'type': 'trade_executed',
@@ -577,7 +594,7 @@ def process_new_order(
                 _calculate_timestamp(locked_group.subsession)
             ])
             save_orders(locked_group, buy_orders, sell_orders)
-            locked_group.save()
+            _commit_trading_state()
 
         else:  # sell
             matching_orders = find_matching_orders(
@@ -601,7 +618,7 @@ def process_new_order(
                 buyer_id = int(best_order[0])
 
                 try:
-                    buyer = _locked_player_by_id(player.__class__, locked_group, buyer_id)
+                    buyer = _reload_player_by_id(player.__class__, locked_group, buyer_id)
                     trade_price = int(float(best_order[1]))  # 確保交易價格為整數
                     execute_trade(locked_group, buyer, locked_player, trade_price, quantity, item_field)
 
@@ -617,7 +634,7 @@ def process_new_order(
                         int(o[2]) == int(best_order[2])
                     )]
                     save_orders(locked_group, buy_orders, sell_orders)
-                    _persist_trade_models(locked_group, buyer, locked_player)
+                    _commit_trading_state()
 
                     return {
                         'type': 'trade_executed',
@@ -639,7 +656,7 @@ def process_new_order(
                 _calculate_timestamp(locked_group.subsession)
             ])
             save_orders(locked_group, buy_orders, sell_orders)
-            locked_group.save()
+            _commit_trading_state()
 
     print(f"成功添加{direction}單: 玩家{player.id_in_group}, 價格{price}, 數量{quantity}")
     return {'type': 'order_added', 'update_all': True}
@@ -682,8 +699,8 @@ def process_accept_offer(
     price = int(price)
     
     try:
-        with transaction.atomic():
-            locked_player, locked_group = _locked_group_and_player(player, group)
+        with _group_order_book_lock(group):
+            locked_player, locked_group = _reload_group_and_player(player, group)
             buy_orders, sell_orders = parse_orders(locked_group)
 
             if offer_type == 'sell':
@@ -696,7 +713,7 @@ def process_accept_offer(
                         }
                     }
 
-                seller = _locked_player_by_id(player.__class__, locked_group, target_id)
+                seller = _reload_player_by_id(player.__class__, locked_group, target_id)
                 execute_trade(locked_group, locked_player, seller, price, quantity, item_field)
 
                 # 保留：交易成功時取消雙方其他訂單
@@ -711,7 +728,7 @@ def process_accept_offer(
                     int(o[2]) == quantity
                 )]
                 save_orders(locked_group, buy_orders, sell_orders)
-                _persist_trade_models(locked_group, locked_player, seller)
+                _commit_trading_state()
 
                 return {
                     'type': 'trade_executed',
@@ -741,7 +758,7 @@ def process_accept_offer(
                         }
                     }
 
-                buyer = _locked_player_by_id(player.__class__, locked_group, target_id)
+                buyer = _reload_player_by_id(player.__class__, locked_group, target_id)
                 execute_trade(locked_group, buyer, locked_player, price, quantity, item_field)
 
                 # 保留：交易成功時取消雙方其他訂單
@@ -756,7 +773,7 @@ def process_accept_offer(
                     int(o[2]) == quantity
                 )]
                 save_orders(locked_group, buy_orders, sell_orders)
-                _persist_trade_models(locked_group, buyer, locked_player)
+                _commit_trading_state()
 
                 return {
                     'type': 'trade_executed',
