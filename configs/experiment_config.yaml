@@ -136,11 +136,6 @@ stages:
       decimal_places: 2  # 小數位數
       console_output_format: "detailed"  # 控制台輸出格式: "simple" 或 "detailed"
 
-  carbon_trading:
-    name_in_url: 'Stage_CarbonTrading'
-    display_name: "碳交易組"
-    description: "碳交易組：受試者在碳權交易市場進行買賣，確定手上持有碳權數量後，再決定生產量"
-
   payment_info:
     name_in_url: 'Stage_Payment_Info'
     display_name: "報酬結算與收據資訊"

@@ -34,7 +34,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function toggleOtherField() {
         const selected = document.querySelector('input[name="env_job_type"]:checked');
 
-        if (selected && selected.value === '其他（請填寫以下欄位）') {
+        if (selected && selected.value === '其他') {
             otherWrapper.style.display = '';
             otherInput.disabled = false;
         } else {
