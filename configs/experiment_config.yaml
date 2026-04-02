@@ -23,7 +23,7 @@ general:
   # players_per_group: 15  # 正式實驗：N 人一組
   players_per_group: 15  #####################################
   # num_rounds: 12 # 正式實驗：T 回合
-  num_rounds: 12 # 正式實驗：T 回合
+  num_rounds: 6 # 正式實驗：T 回合
   max_production: 50 # （實際上用不到）
   random_dominant_firm_each_round: False
   carbon_real_world_rate: 0.1 # 1 單位實驗中碳排放 = 現實生活多少單位

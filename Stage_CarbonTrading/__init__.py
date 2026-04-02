@@ -24,9 +24,10 @@ class C(BaseConstants):
     PLAYERS_PER_GROUP: int = config.players_per_group
     # 0301 為符合新的實驗內容修改，將config設定的回合數*2
     # NUM_ROUNDS: int = config.num_rounds
-    #######################
-    BASE_ROUNDS: int = config.num_rounds
-    NUM_ROUNDS: int = BASE_ROUNDS * 2 
+    #######################0402
+    EQUAL_ROUNDS: int = config.num_rounds          # yaml 輸入 6，代表平均分配 6 回合
+    GF_ROUNDS: int = config.num_rounds * 2         # 祖父分配固定兩倍 = 12 回合
+    NUM_ROUNDS: int = EQUAL_ROUNDS + GF_ROUNDS     # 總共 18 回合
     ######################   
     TRADING_TIME: int = config.carbon_trading_time
     INITIAL_CAPITAL: int = config.get_stage_initial_capital('carbon_trading')
@@ -297,46 +298,94 @@ def calculate_optimal_allowance_allocation(
     
 #     initialize_roles(subsession, allocation_method)
 ############################################################
+# def creating_session(subsession: Subsession) -> None:
+#     #subsession.get_players() 會拿到這個 subsession（也就是這一回合）裡的所有玩家列表
+#     #set_group_matrix([...]) 需要的是「分組矩陣」：外面那層 list 代表有幾組，裡面每個 list 代表那組有哪些人
+#     #只有 1 組，而且這 1 組包含全部玩家
+#     subsession.set_group_matrix([subsession.get_players()])
+
+#     session_key = "selected_round__Stage_CarbonTrading"
+#     ##subsession.session.vars 是整個 session 共用的參數，如果 session.vars 裡還沒有session_key(名稱)，就在1 到 C.NUM_ROUNDS 抽一個數字
+#     if session_key not in subsession.session.vars:
+#         subsession.session.vars[session_key] = random.randint(1, C.NUM_ROUNDS)
+
+#     # 指 subsession.round_number(回合數) < C.BASE_ROUNDS(一半的回合數)就是part1，否則是part2
+#     part = 1 if subsession.round_number <= C.BASE_ROUNDS else 2
+#     local_round = subsession.round_number if part == 1 else (subsession.round_number - C.BASE_ROUNDS)
+
+#     # param = get_parameter_set_for_round(
+#     #     subsession.session,
+#     #     subsession.round_number,
+#     #     stage_key='carbon_trading'
+#     # )
+#     param = get_parameter_set_for_round(
+#         subsession.session,
+#         local_round,                         # 1..12 / 1..12
+#         stage_key=f'carbon_trading_part{part}'  # 分成兩條獨立抽樣序列
+#     )
+    
+#     subsession.market_price = param['market_price']
+#     subsession.tax_rate = param['tax_rate']
+#     subsession.carbon_multiplier = param['carbon_multiplier']
+#     subsession.dominant_mc = param['dominant_mc']
+#     subsession.non_dominant_mc = param['non_dominant_mc']
+
+#     ### 新增：依順序 + 前半/後半決定 allocation_method
+#     order = subsession.session.config.get('allocation_order', 'GF_then_Equal')
+#     if order == 'GF_then_Equal':
+#         first, second = 'grandfathering', 'equal'
+#     else:
+#         first, second = 'equal', 'grandfathering'
+#     ###
+#     allocation_method = first if subsession.round_number <= C.BASE_ROUNDS else second
+#     subsession.allocation_method = allocation_method
+
+#     initialize_roles(subsession, allocation_method)
+#0402
 def creating_session(subsession: Subsession) -> None:
-    #subsession.get_players() 會拿到這個 subsession（也就是這一回合）裡的所有玩家列表
-    #set_group_matrix([...]) 需要的是「分組矩陣」：外面那層 list 代表有幾組，裡面每個 list 代表那組有哪些人
-    #只有 1 組，而且這 1 組包含全部玩家
     subsession.set_group_matrix([subsession.get_players()])
 
     session_key = "selected_round__Stage_CarbonTrading"
-    ##subsession.session.vars 是整個 session 共用的參數，如果 session.vars 裡還沒有session_key(名稱)，就在1 到 C.NUM_ROUNDS 抽一個數字
     if session_key not in subsession.session.vars:
         subsession.session.vars[session_key] = random.randint(1, C.NUM_ROUNDS)
 
-    # 指 subsession.round_number(回合數) < C.BASE_ROUNDS(一半的回合數)就是part1，否則是part2
-    part = 1 if subsession.round_number <= C.BASE_ROUNDS else 2
-    local_round = subsession.round_number if part == 1 else (subsession.round_number - C.BASE_ROUNDS)
+    order = subsession.session.config.get('allocation_order', 'GF_then_Equal')
 
-    # param = get_parameter_set_for_round(
-    #     subsession.session,
-    #     subsession.round_number,
-    #     stage_key='carbon_trading'
-    # )
+    round_number = subsession.round_number
+
+    # 決定這一回合屬於哪個 treatment，以及該 treatment 內的 local round
+    if order == 'GF_then_Equal':
+        if round_number <= C.GF_ROUNDS:
+            allocation_method = 'grandfathering'
+            local_round = round_number                  # 1~12
+            stage_key = 'carbon_trading_grandfathering'
+        else:
+            allocation_method = 'equal'
+            local_round = round_number - C.GF_ROUNDS   # 1~6
+            stage_key = 'carbon_trading_equal'
+
+    else:  # Equal_then_GF
+        if round_number <= C.EQUAL_ROUNDS:
+            allocation_method = 'equal'
+            local_round = round_number                 # 1~6
+            stage_key = 'carbon_trading_equal'
+        else:
+            allocation_method = 'grandfathering'
+            local_round = round_number - C.EQUAL_ROUNDS  # 1~12
+            stage_key = 'carbon_trading_grandfathering'
+
     param = get_parameter_set_for_round(
         subsession.session,
-        local_round,                         # 1..12 / 1..12
-        stage_key=f'carbon_trading_part{part}'  # 分成兩條獨立抽樣序列
+        local_round,
+        stage_key=stage_key
     )
-    
+
     subsession.market_price = param['market_price']
     subsession.tax_rate = param['tax_rate']
     subsession.carbon_multiplier = param['carbon_multiplier']
     subsession.dominant_mc = param['dominant_mc']
     subsession.non_dominant_mc = param['non_dominant_mc']
 
-    ### 新增：依順序 + 前半/後半決定 allocation_method
-    order = subsession.session.config.get('allocation_order', 'GF_then_Equal')
-    if order == 'GF_then_Equal':
-        first, second = 'grandfathering', 'equal'
-    else:
-        first, second = 'equal', 'grandfathering'
-    ###
-    allocation_method = first if subsession.round_number <= C.BASE_ROUNDS else second
     subsession.allocation_method = allocation_method
 
     initialize_roles(subsession, allocation_method)
