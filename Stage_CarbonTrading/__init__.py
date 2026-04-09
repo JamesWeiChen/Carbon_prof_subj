@@ -531,8 +531,8 @@ class TradingMarket(Page):
             price = int(data.get('price', 0))
             quantity = int(data.get('quantity', 0))
             
-            # 記錄提交的訂單
-            record_submitted_offer(player, direction, price, quantity)
+            # 記錄提交的訂單#0408註解掉
+            #record_submitted_offer(player, direction, price, quantity)
             
             print(f"玩家 {player.id_in_group} 提交{direction}單: "
                   f"價格={price}, 數量={quantity}, "

@@ -501,6 +501,8 @@ def process_new_order(
     with _group_order_book_lock(group):
         locked_player, locked_group = _reload_group_and_player(player, group)
 
+        #0408
+        record_submitted_offer(locked_player, direction, price, quantity)
         # 驗證訂單
         try:
             validate_order(locked_player, direction, price, quantity, item_name)
